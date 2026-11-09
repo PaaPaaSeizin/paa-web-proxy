@@ -319,4 +319,652 @@ iframe {
       <button class="shortcut" data-url="https://www.wikipedia.org">Wikipedia<span>百科事典</span></button>
     </div>
 
-    <div class="section
+    <div class="section-title">最近の履歴</div>
+    <div id="recent"></div>
+  </div>
+
+  <div id="panel"></div>
+  <div id="status"></div>
+</main>
+
+<nav id="bottom">
+  <button data-panel="home" class="active">⌂<br>ホーム</button>
+  <button data-panel="bookmarks">☆<br>ブックマーク</button>
+  <button data-panel="history">◷<br>履歴</button>
+  <button data-panel="tabs">▣<br>タブ</button>
+  <button data-panel="settings">⚙<br>設定</button>
+</nav>
+
+</div>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+
+const STORAGE = "webviewer_v2";
+
+const defaults = {
+  worker: "https://paa-web-proxy.paapaaseizin.workers.dev",
+  search: "https://www.google.com/search?q=",
+  proxy: true
+};
+
+let settings = {...defaults};
+let tabs = [];
+let activeId = null;
+let bookmarks = [];
+let historyList = [];
+let currentPanel = "home";
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+}
+
+function save() {
+  try {
+    localStorage.setItem(STORAGE, JSON.stringify({
+      settings, tabs, activeId, bookmarks, historyList
+    }));
+  } catch(e) {
+    console.warn("保存できませんでした", e);
+  }
+}
+
+function load() {
+  try {
+    const data = JSON.parse(localStorage.getItem(STORAGE) || "{}");
+    settings = {...defaults, ...data.settings};
+    tabs = Array.isArray(data.tabs) ? data.tabs : [];
+    activeId = data.activeId || null;
+    bookmarks = Array.isArray(data.bookmarks) ? data.bookmarks : [];
+    historyList = Array.isArray(data.historyList) ? data.historyList : [];
+  } catch(e) {
+    console.warn(e);
+  }
+
+  if (!tabs.length) {
+    const tab = createTabObject();
+    tabs.push(tab);
+    activeId = tab.id;
+  }
+
+  if (!tabs.some(t => t.id === activeId)) {
+    activeId = tabs[0].id;
+  }
+}
+
+function createTabObject() {
+  return {
+    id: uid(),
+    title: "新しいタブ",
+    url: "",
+    history: [],
+    index: -1
+  };
+}
+
+function currentTab() {
+  return tabs.find(t => t.id === activeId);
+}
+
+function normalize(input) {
+  let value = input.trim();
+  if (!value) return "";
+
+  if (/^(javascript|data|file):/i.test(value)) {
+    return "";
+  }
+
+  if (/^https?:\/\//i.test(value)) return value;
+
+  if (/^[\w-]+(\.[\w-]+)+([/:?#].*)?$/i.test(value)) {
+    return "https://" + value;
+  }
+
+  return settings.search + encodeURIComponent(value);
+}
+
+function workerURL(target) {
+  if (!settings.proxy) return target;
+  return settings.worker.replace(/\/+$/, "") +
+    "/?url=" + encodeURIComponent(target);
+}
+
+function setStatus(message) {
+  $("status").textContent = message;
+  $("status").style.display = "block";
+  clearTimeout(setStatus.timer);
+  setStatus.timer = setTimeout(() => {
+    $("status").style.display = "none";
+  }, 3000);
+}
+
+function renderTabs() {
+  const container = $("tabs");
+  container.innerHTML = "";
+
+  tabs.forEach(tab => {
+    const button = document.createElement("button");
+    button.className = "tab" + (tab.id === activeId ? " active" : "");
+
+    const name = document.createElement("span");
+    name.className = "tabname";
+    name.textContent = tab.title || "新しいタブ";
+    name.onclick = () => switchTab(tab.id);
+
+    const close = document.createElement("button");
+    close.className = "tabclose";
+    close.textContent = "×";
+    close.onclick = e => {
+      e.stopPropagation();
+      closeTab(tab.id);
+    };
+
+    button.append(name, close);
+    container.append(button);
+  });
+
+  $("tabCount").textContent = tabs.length + " tab";
+}
+
+function updateControls() {
+  const tab = currentTab();
+  $("url").value = tab.url || "";
+
+  $("back").disabled = tab.index <= 0;
+  $("forward").disabled = tab.index >= tab.history.length - 1;
+
+  $("bookmarkBtn").textContent =
+    bookmarks.some(b => b.url === tab.url) ? "★" : "☆";
+}
+
+function displayHome() {
+  $("frame").style.display = "none";
+  $("home").style.display = "block";
+  $("panel").style.display = "none";
+}
+
+function displayPage() {
+  $("home").style.display = "none";
+  $("panel").style.display = "none";
+  $("frame").style.display = "block";
+}
+
+function switchTab(id) {
+  const tab = tabs.find(t => t.id === id);
+  if (!tab) return;
+
+  activeId = id;
+  renderTabs();
+  updateControls();
+
+  if (tab.url) {
+    displayPage();
+    $("frame").src = workerURL(tab.url);
+  } else {
+    displayHome();
+  }
+
+  save();
+}
+
+function addHistory(url) {
+  if (!url) return;
+
+  historyList.unshift({
+    url,
+    title: url,
+    time: Date.now()
+  });
+
+  historyList = historyList.slice(0,300);
+}
+
+function navigate(input, add = true) {
+  const url = normalize(input);
+  if (!url) {
+    setStatus("URLを確認してください");
+    return;
+  }
+
+  const tab = currentTab();
+
+  if (add) {
+    tab.history = tab.history.slice(0, tab.index + 1);
+    tab.history.push(url);
+    tab.index = tab.history.length - 1;
+  }
+
+  tab.url = url;
+  tab.title = new URL(url).hostname;
+
+  addHistory(url);
+  save();
+
+  displayPage();
+  $("frame").src = workerURL(url);
+
+  updateControls();
+  renderTabs();
+  renderRecent();
+  setStatus("ページを読み込んでいます");
+}
+
+function goBack() {
+  const tab = currentTab();
+  if (tab.index <= 0) return;
+
+  tab.index--;
+  tab.url = tab.history[tab.index];
+  save();
+  switchTab(tab.id);
+}
+
+function goForward() {
+  const tab = currentTab();
+  if (tab.index >= tab.history.length - 1) return;
+
+  tab.index++;
+  tab.url = tab.history[tab.index];
+  save();
+  switchTab(tab.id);
+}
+
+function reloadPage() {
+  const tab = currentTab();
+  if (!tab.url) return;
+  $("frame").src = workerURL(tab.url);
+  setStatus("再読み込みしています");
+}
+
+function newTab() {
+  const tab = createTabObject();
+  tabs.push(tab);
+  activeId = tab.id;
+  save();
+  renderTabs();
+  updateControls();
+  displayHome();
+}
+
+function closeTab(id) {
+  if (tabs.length === 1) {
+    const tab = tabs[0];
+    Object.assign(tab, createTabObject());
+    activeId = tab.id;
+    save();
+    switchTab(tab.id);
+    return;
+  }
+
+  const index = tabs.findIndex(t => t.id === id);
+  tabs = tabs.filter(t => t.id !== id);
+
+  if (activeId === id) {
+    activeId = tabs[Math.max(0,index - 1)].id;
+  }
+
+  save();
+  switchTab(activeId);
+}
+
+function toggleBookmark() {
+  const tab = currentTab();
+  if (!tab.url) return;
+
+  const index = bookmarks.findIndex(b => b.url === tab.url);
+
+  if (index >= 0) {
+    bookmarks.splice(index,1);
+    setStatus("ブックマークを削除しました");
+  } else {
+    bookmarks.unshift({
+      url:tab.url,
+      title:tab.title,
+      time:Date.now()
+    });
+    setStatus("ブックマークに追加しました");
+  }
+
+  save();
+  updateControls();
+}
+
+function openURL(url) {
+  navigate(url);
+}
+
+function renderRecent() {
+  const root = $("recent");
+  root.innerHTML = "";
+
+  historyList.slice(0,5).forEach(item => {
+    const button = document.createElement("button");
+    button.className = "item";
+    button.style.width = "100%";
+    button.style.textAlign = "left";
+
+    const content = document.createElement("span");
+    content.className = "item-content";
+    content.textContent = item.url;
+    content.onclick = () => openURL(item.url);
+
+    button.append(content);
+    root.append(button);
+  });
+}
+
+function showPanel(name) {
+  currentPanel = name;
+
+  document.querySelectorAll("#bottom button").forEach(button => {
+    button.classList.toggle("active", button.dataset.panel === name);
+  });
+
+  if (name === "home") {
+    displayHome();
+    return;
+  }
+
+  $("home").style.display = "none";
+  $("frame").style.display = "none";
+
+  const panel = $("panel");
+  panel.style.display = "block";
+  panel.innerHTML = "";
+
+  const title = document.createElement("h2");
+  title.textContent = {
+    bookmarks:"ブックマーク",
+    history:"閲覧履歴",
+    tabs:"タブ一覧",
+    settings:"設定"
+  }[name] || name;
+
+  panel.append(title);
+
+  if (name === "bookmarks") {
+    renderList(panel,bookmarks,true);
+  }
+
+  if (name === "history") {
+    renderList(panel,historyList,false);
+
+    const clear = document.createElement("button");
+    clear.textContent = "履歴をすべて削除";
+    clear.style.marginTop = "18px";
+    clear.onclick = () => {
+      if (!confirm("閲覧履歴を削除しますか？")) return;
+      historyList = [];
+      save();
+      showPanel("history");
+    };
+    panel.append(clear);
+  }
+
+  if (name === "tabs") {
+    tabs.forEach(tab => {
+      const row = document.createElement("div");
+      row.className = "item";
+
+      const content = document.createElement("div");
+      content.className = "item-content";
+
+      const name = document.createElement("div");
+      name.className = "item-title";
+      name.textContent = tab.title;
+
+      const sub = document.createElement("div");
+      sub.className = "item-sub";
+      sub.textContent = tab.url || "新しいタブ";
+
+      content.append(name,sub);
+      content.onclick = () => switchTab(tab.id);
+
+      const close = document.createElement("button");
+      close.textContent = "×";
+      close.onclick = () => {
+        closeTab(tab.id);
+        showPanel("tabs");
+      };
+
+      row.append(content,close);
+      panel.append(row);
+    });
+
+    const add = document.createElement("button");
+    add.textContent = "＋ 新しいタブ";
+    add.style.marginTop = "18px";
+    add.onclick = () => {
+      newTab();
+      showPanel("home");
+    };
+    panel.append(add);
+  }
+
+  if (name === "settings") {
+    renderSettings(panel);
+  }
+}
+
+function renderList(panel,list,isBookmark) {
+  if (!list.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "まだ登録されていません";
+    empty.style.color = "var(--muted)";
+    panel.append(empty);
+    return;
+  }
+
+  list.forEach(item => {
+    const row = document.createElement("div");
+    row.className = "item";
+
+    const content = document.createElement("div");
+    content.className = "item-content";
+
+    const name = document.createElement("div");
+    name.className = "item-title";
+    name.textContent = item.title || item.url;
+
+    const sub = document.createElement("div");
+    sub.className = "item-sub";
+    sub.textContent = item.url;
+
+    content.append(name,sub);
+    content.onclick = () => {
+      showPanel("home");
+      openURL(item.url);
+    };
+
+    row.append(content);
+
+    if (isBookmark) {
+      const remove = document.createElement("button");
+      remove.textContent = "削除";
+      remove.onclick = () => {
+        bookmarks = bookmarks.filter(b => b.url !== item.url);
+        save();
+        showPanel("bookmarks");
+      };
+      row.append(remove);
+    }
+
+    panel.append(row);
+  });
+}
+
+function renderSettings(panel) {
+  const worker = document.createElement("div");
+  worker.className = "setting";
+
+  const label = document.createElement("label");
+  label.textContent = "Cloudflare Worker URL";
+
+  const input = document.createElement("input");
+  input.value = settings.worker;
+  input.placeholder = "https://example.workers.dev";
+
+  const saveWorker = document.createElement("button");
+  saveWorker.textContent = "Worker URLを保存";
+  saveWorker.style.marginTop = "10px";
+  saveWorker.onclick = () => {
+    try {
+      const u = new URL(input.value);
+      if (u.protocol !== "https:") throw Error();
+      settings.worker = u.origin;
+      save();
+      setStatus("保存しました");
+    } catch {
+      setStatus("Worker URLが正しくありません");
+    }
+  };
+
+  const help = document.createElement("small");
+  help.textContent = "Cloudflare WorkersのURLを入力してください。";
+
+  worker.append(label,input,saveWorker,help);
+  panel.append(worker);
+
+  const search = document.createElement("div");
+  search.className = "setting";
+
+  const searchLabel = document.createElement("label");
+  searchLabel.textContent = "検索エンジン";
+
+  const select = document.createElement("select");
+  select.style.width = "100%";
+  select.style.padding = "12px";
+  select.style.background = "var(--panel)";
+  select.style.color = "var(--text)";
+  select.style.border = "1px solid var(--border)";
+  select.style.borderRadius = "12px";
+
+  [
+    ["Google","https://www.google.com/search?q="],
+    ["Bing","https://www.bing.com/search?q="],
+    ["DuckDuckGo","https://duckduckgo.com/?q="]
+  ].forEach(([name,url]) => {
+    const option = document.createElement("option");
+    option.value = url;
+    option.textContent = name;
+    select.append(option);
+  });
+
+  select.value = settings.search;
+  select.onchange = () => {
+    settings.search = select.value;
+    save();
+  };
+
+  search.append(searchLabel,select);
+  panel.append(search);
+
+  const proxy = document.createElement("div");
+  proxy.className = "setting";
+
+  const proxyLabel = document.createElement("label");
+  proxyLabel.textContent = "Worker経由の表示";
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = settings.proxy;
+  checkbox.style.width = "auto";
+  checkbox.onchange = () => {
+    settings.proxy = checkbox.checked;
+    save();
+    setStatus("設定を保存しました");
+  };
+
+  const proxyHelp = document.createElement("small");
+  proxyHelp.textContent = "オフにすると対象サイトへ直接アクセスします。サイトによってはiframe表示が拒否されます。";
+
+  proxy.append(checkbox,proxyLabel,proxyHelp);
+  panel.append(proxy);
+
+  const reset = document.createElement("button");
+  reset.textContent = "設定を初期化";
+  reset.style.marginTop = "20px";
+  reset.onclick = () => {
+    if (!confirm("設定を初期化しますか？")) return;
+    settings = {...defaults};
+    save();
+    showPanel("settings");
+  };
+  panel.append(reset);
+}
+
+$("go").onclick = () => navigate($("url").value);
+$("url").addEventListener("keydown",e => {
+  if (e.key === "Enter") navigate($("url").value);
+});
+
+$("homeGo").onclick = () => {
+  navigate($("homeSearch").value);
+};
+
+$("homeSearch").addEventListener("keydown",e => {
+  if (e.key === "Enter") navigate($("homeSearch").value);
+});
+
+$("back").onclick = goBack;
+$("forward").onclick = goForward;
+$("reload").onclick = reloadPage;
+$("homeBtn").onclick = () => showPanel("home");
+$("bookmarkBtn").onclick = toggleBookmark;
+$("newTab").onclick = newTab;
+
+document.querySelectorAll("#bottom button").forEach(button => {
+  button.onclick = () => showPanel(button.dataset.panel);
+});
+
+document.querySelectorAll(".shortcut").forEach(button => {
+  button.onclick = () => navigate(button.dataset.url);
+});
+
+// Worker内のページからの遷移通知
+window.addEventListener("message", event => {
+  let workerOrigin;
+
+  try {
+    workerOrigin = new URL(settings.worker).origin;
+  } catch {
+    return;
+  }
+
+  if (event.origin !== workerOrigin) return;
+  if (!event.data || event.data.type !== "wv:navigate") return;
+
+  if (typeof event.data.url !== "string") return;
+
+  try {
+    const target = new URL(event.data.url);
+
+    if (!["http:","https:"].includes(target.protocol)) return;
+
+    navigate(target.href);
+  } catch {
+    return;
+  }
+});
+
+$("frame").addEventListener("load",() => {
+  const tab = currentTab();
+  if (tab.url) setStatus("読み込み完了");
+});
+
+load();
+renderTabs();
+updateControls();
+renderRecent();
+
+if (currentTab().url) {
+  switchTab(activeId);
+} else {
+  displayHome();
+}
+</script>
+</body>
+</html>
+```
